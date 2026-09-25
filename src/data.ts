@@ -2,6 +2,14 @@ import type { Cue, CueConflict, LightingPlan, Scene, UserRole } from './types';
 
 const FIXED_TIME = '2026-09-25T02:00:00.000Z';
 
+export function formatTime(value: number | undefined) {
+  const safe = Math.max(0, value ?? 0);
+  const minutes = Math.floor(safe / 60);
+  const seconds = Math.floor(safe % 60);
+  const tenths = Math.floor((safe % 1) * 10);
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${tenths}`;
+}
+
 export const roleLabels: Record<UserRole, string> = {
   designer: '灯光设计',
   programmer: '编程执行',
@@ -141,8 +149,14 @@ export function recalculatePlans(plans: LightingPlan[]) {
     const scenes = [...plan.scenes].sort((a, b) => a.order - b.order);
     let absoluteCursor = 0;
     for (const scene of scenes) {
-      scene.startTime = absoluteCursor;
-      let sceneCursor = absoluteCursor;
+      if (scene.frozen) {
+        // 固定档期：冻结场次记录开始点，之后只重排未冻结部分。
+        // 旧数据缺少记录时，按当前顺排位置补记为固定时刻。
+        scene.frozenStartTime = Number((scene.frozenStartTime ?? absoluteCursor).toFixed(2));
+      }
+      const sceneStart = scene.frozen && scene.frozenStartTime != null ? scene.frozenStartTime : absoluteCursor;
+      scene.startTime = Number(sceneStart.toFixed(2));
+      let sceneCursor = sceneStart;
       for (const item of scene.cues) {
         const duration = Math.max(0.1, item.fadeIn + item.hold + item.fadeOut);
         item.duration = Number(duration.toFixed(2));
@@ -154,8 +168,9 @@ export function recalculatePlans(plans: LightingPlan[]) {
         item.endTime = Number((item.startTime + duration).toFixed(2));
         sceneCursor = Math.max(sceneCursor, item.endTime);
       }
-      scene.duration = Number(Math.max(0, sceneCursor - absoluteCursor).toFixed(2));
-      absoluteCursor = sceneCursor;
+      scene.duration = Number(Math.max(0, sceneCursor - sceneStart).toFixed(2));
+      // 上游内容可能撞进固定档期，游标取较大者，保证后续未冻结场次不与任何前序内容重叠
+      absoluteCursor = Math.max(absoluteCursor, sceneCursor);
     }
   }
   return plans;
@@ -164,6 +179,39 @@ export function recalculatePlans(plans: LightingPlan[]) {
 export function detectConflicts(plans: LightingPlan[]): CueConflict[] {
   const conflicts: CueConflict[] = [];
   for (const plan of plans) {
+    // 固定档期与上游排期的关系：上游撞到固定点记为排期冲突，提前结束留出空白记为空档
+    let upstreamEnd = 0;
+    const orderedScenes = [...plan.scenes].sort((a, b) => a.order - b.order);
+    for (const scene of orderedScenes) {
+      if (scene.frozen && scene.frozenStartTime != null) {
+        const fixedStart = scene.frozenStartTime;
+        const delta = Number((fixedStart - upstreamEnd).toFixed(2));
+        const anchorCueId = scene.cues[0]?.id ?? '';
+        if (delta < -0.05) {
+          conflicts.push({
+            id: `${plan.id}-${scene.id}-schedule-conflict`,
+            planId: plan.id,
+            sceneId: scene.id,
+            cueId: anchorCueId,
+            severity: 'error',
+            type: 'schedule-conflict',
+            message: `「${scene.name}」固定于 ${formatTime(fixedStart)} 开始，但上游场次要到 ${formatTime(upstreamEnd)} 才结束，占用固定档期 ${formatTime(-delta)}，请压缩上游场次或解冻后重新固定`
+          });
+        } else if (delta > 0.05) {
+          conflicts.push({
+            id: `${plan.id}-${scene.id}-schedule-gap`,
+            planId: plan.id,
+            sceneId: scene.id,
+            cueId: anchorCueId,
+            severity: 'warning',
+            type: 'schedule-gap',
+            message: `「${scene.name}」固定于 ${formatTime(fixedStart)} 开始，上游场次 ${formatTime(upstreamEnd)} 就已结束，中间留有 ${formatTime(delta)} 空档`
+          });
+        }
+      }
+      upstreamEnd = Math.max(upstreamEnd, (scene.startTime ?? 0) + (scene.duration ?? 0));
+    }
+
     for (const scene of plan.scenes) {
       const byChannel = new Map<string, Cue[]>();
       const positions = new Map<string, Cue[]>();

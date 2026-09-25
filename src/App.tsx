@@ -67,6 +67,7 @@ import {
   Lock,
   LockOpen,
   Pause,
+  Pin,
   Plus,
   Redo2,
   RefreshCw,
@@ -110,7 +111,9 @@ function conflictLabel(conflict: CueConflict) {
     'follow-order': '跟随关系',
     'missing-data': '数据缺失',
     'duplicate-position': '灯位重复',
-    duration: '时间异常'
+    duration: '时间异常',
+    'schedule-conflict': '排期冲突',
+    'schedule-gap': '空档提示'
   }[conflict.type];
 }
 
@@ -293,7 +296,7 @@ function CueInspector({ cue, scene, workspace, canEdit, conflicts, onApply, onDe
         <Alert status="warning" borderRadius="lg">
           <AlertIcon />
           <AlertDescription fontSize="sm">
-            {scene.frozen ? '该场次已冻结。解除冻结后才能修改。' : '当前角色只能查看或执行场次冻结，不能修改提示参数。'}
+            {scene.frozen ? '该场次已冻结为固定档期，解除冻结后才能修改。' : '当前角色只能查看或执行场次冻结，不能修改提示参数。'}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -485,7 +488,7 @@ function ConflictList({
       <Flex minH="240px" align="center" justify="center" color="green.300" textAlign="center">
         <Box>
           <ShieldCheck size={36} style={{ margin: '0 auto 10px' }} />
-          <Text>没有检测到时间、通道或数据冲突</Text>
+          <Text>没有检测到时间、通道、排期或数据冲突</Text>
         </Box>
       </Flex>
     );
@@ -697,9 +700,26 @@ export default function App() {
       toast({ title: '当前角色不能冻结或解冻场次', status: 'warning' });
       return;
     }
-    commit(activeScene.frozen ? '解除场次冻结' : '冻结已确认场次', (next) => {
+    const wasFrozen = activeScene.frozen;
+    const fixedAt = formatTime(activeScene.startTime);
+    commit(wasFrozen ? '解除冻结，从上一场结束点重新顺排' : '冻结场次并固定档期', (next) => {
       const scene = next.plans.find((plan) => plan.id === next.activePlanId)?.scenes.find((item) => item.id === next.selectedSceneId);
-      if (scene) scene.frozen = !scene.frozen;
+      if (!scene) return;
+      if (scene.frozen) {
+        scene.frozen = false;
+        scene.frozenStartTime = undefined;
+      } else {
+        scene.frozen = true;
+        scene.frozenStartTime = Number((scene.startTime ?? 0).toFixed(2));
+      }
+    });
+    toast({
+      title: wasFrozen ? '已解除冻结' : '已冻结为固定档期',
+      description: wasFrozen
+        ? '该场次将从上一场结束点重新顺排，后续场次同步更新。'
+        : `开始时刻固定为 ${fixedAt}，之后上游场次延长或缩短只重排未冻结部分。`,
+      status: 'success',
+      duration: 2400
     });
   }
 
@@ -925,10 +945,21 @@ export default function App() {
                       <Flex align="center" gap={2}>
                         <Text color="amber.300" fontFamily="mono" fontSize="xs">{(scene.order).toString().padStart(2, '0')}</Text>
                         <Text fontWeight="650" fontSize="sm" flex="1" noOfLines={1}>{scene.name}</Text>
-                        {scene.frozen ? <Lock size={13} color="#9ae6b4" /> : <Unlock size={13} color="#718096" />}
+                        {scene.frozen ? (
+                          <Tooltip label={`固定档期，${formatTime(scene.frozenStartTime)} 开始`}>
+                            <Lock size={13} color="#9ae6b4" aria-label="已冻结为固定档期" />
+                          </Tooltip>
+                        ) : (
+                          <Unlock size={13} color="#718096" />
+                        )}
                       </Flex>
-                      <Flex mt={2} color="whiteAlpha.500" fontSize="10px" gap={2}>
-                        <Text>{formatTime(scene.duration)}</Text>
+                      <Flex mt={2} color="whiteAlpha.500" fontSize="10px" gap={2} wrap="wrap">
+                        {scene.frozen && scene.frozenStartTime != null ? (
+                          <Text color="green.300" fontWeight="700">固定 {formatTime(scene.frozenStartTime)}</Text>
+                        ) : (
+                          <Text>开始 {formatTime(scene.startTime)}</Text>
+                        )}
+                        <Text>时长 {formatTime(scene.duration)}</Text>
                         <Text>{scene.cues.length} 条</Text>
                         <Text color={sceneConflicts.length ? 'orange.300' : 'green.300'}>{sceneConflicts.length} 冲突</Text>
                       </Flex>
@@ -979,27 +1010,52 @@ export default function App() {
               <Box borderWidth="1px" borderColor="whiteAlpha.100" borderRadius="xl" bg="whiteAlpha.50" p={4}>
                 <Flex align={{ base: 'start', md: 'center' }} gap={3} wrap="wrap">
                   <Box>
-                    <Flex align="center" gap={2}>
+                    <Flex align="center" gap={2} wrap="wrap">
                       <Heading size="md">{activeScene.name}</Heading>
-                      {activeScene.frozen ? <Tag colorScheme="green"><HStack spacing={1}><Lock size={12} /><Text>已冻结</Text></HStack></Tag> : <Tag variant="subtle">编辑中</Tag>}
+                      {activeScene.frozen ? (
+                        <Tag colorScheme="green">
+                          <HStack spacing={1}>
+                            <Lock size={12} />
+                            <Text>已冻结 · 固定 {formatTime(activeScene.frozenStartTime)}</Text>
+                          </HStack>
+                        </Tag>
+                      ) : (
+                        <Tag variant="subtle">编辑中</Tag>
+                      )}
                     </Flex>
                     <Text color="whiteAlpha.500" fontSize="sm" mt={1}>
-                      场次开始 {formatTime(activeScene.startTime)} · 时长 {formatTime(activeScene.duration)} · {activeScene.cues.length} 条提示
+                      {activeScene.frozen && activeScene.frozenStartTime != null
+                        ? `固定档期 ${formatTime(activeScene.frozenStartTime)} 开始 · 时长 ${formatTime(activeScene.duration)} · ${activeScene.cues.length} 条提示 · 不随上游场次推后`
+                        : `场次开始 ${formatTime(activeScene.startTime)} · 时长 ${formatTime(activeScene.duration)} · ${activeScene.cues.length} 条提示`}
                     </Text>
                   </Box>
                   <Spacer />
                   <ButtonGroup size="sm" variant="outline">
                     <Button leftIcon={<Plus size={15} />} isDisabled={!editable} onClick={addCue}>新增提示</Button>
-                    <Button leftIcon={activeScene.frozen ? <LockOpen size={15} /> : <Lock size={15} />} isDisabled={!freezer} onClick={toggleFreeze}>
-                      {activeScene.frozen ? '解除冻结' : '冻结场次'}
-                    </Button>
+                    <Tooltip
+                      label={activeScene.frozen
+                        ? '解除冻结：从上一场结束点重新顺排，后续场次同步更新'
+                        : '冻结场次：按当前开始点固定档期，上游场次变化不再推后'}
+                    >
+                      <Button leftIcon={activeScene.frozen ? <LockOpen size={15} /> : <Lock size={15} />} isDisabled={!freezer} onClick={toggleFreeze}>
+                        {activeScene.frozen ? '解除冻结' : '冻结场次'}
+                      </Button>
+                    </Tooltip>
                     <Button leftIcon={<SkipForward size={15} />} onClick={jumpIncomplete}>定位未完成</Button>
                   </ButtonGroup>
                 </Flex>
 
                 <Box mt={4}>
-                  <Flex mb={2} align="center">
+                  <Flex mb={2} align="center" gap={2} wrap="wrap">
                     <Text color="whiteAlpha.600" fontSize="xs">自动重算时间轴</Text>
+                    {activeScene.frozen && activeScene.frozenStartTime != null ? (
+                      <Tag size="sm" colorScheme="green" variant="subtle" aria-label={`固定档期，${formatTime(activeScene.frozenStartTime)} 开始`}>
+                        <HStack spacing={1}>
+                          <Pin size={11} />
+                          <Text>固定档期 · {formatTime(activeScene.frozenStartTime)} 开始</Text>
+                        </HStack>
+                      </Tag>
+                    ) : null}
                     <Spacer />
                     <Text color="whiteAlpha.500" fontSize="xs">{formatTime(activeScene.startTime)} — {formatTime((activeScene.startTime ?? 0) + (activeScene.duration ?? 0))}</Text>
                   </Flex>
@@ -1033,7 +1089,7 @@ export default function App() {
                   <AlertIcon />
                   <AlertDescription>
                     {activeScene.frozen
-                      ? '该场次已冻结。提示顺序与参数保持只读；可由灯光设计或舞台监督解除冻结。'
+                      ? `该场次已冻结为固定档期（${formatTime(activeScene.frozenStartTime)} 开始），上游场次延长或缩短只重排未冻结部分；提示顺序与参数保持只读。解除冻结后将按上一场结束点重新顺排。`
                       : '当前角色处于审阅或执行权限，拖动顺序与参数编辑已锁定。'}
                   </AlertDescription>
                 </Alert>

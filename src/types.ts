@@ -28,6 +28,8 @@ export interface Scene {
   name: string;
   order: number;
   frozen: boolean;
+  /** 冻结时记录的固定开始时刻（秒）。固定档期不随上游场次延长或缩短而推后 */
+  frozenStartTime?: number;
   startTime?: number;
   duration?: number;
   cues: Cue[];
@@ -47,7 +49,14 @@ export interface CueConflict {
   cueId: string;
   sceneId: string;
   severity: ConflictSeverity;
-  type: 'channel-overlap' | 'follow-order' | 'missing-data' | 'duplicate-position' | 'duration';
+  type:
+    | 'channel-overlap'
+    | 'follow-order'
+    | 'missing-data'
+    | 'duplicate-position'
+    | 'duration'
+    | 'schedule-conflict'
+    | 'schedule-gap';
   message: string;
 }
 
