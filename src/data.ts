@@ -136,13 +136,28 @@ const tourPlan: LightingPlan = {
 
 export const samplePlans = [mainPlan, coolPlan, tourPlan];
 
+export function formatTime(value: number | undefined) {
+  const safe = Math.max(0, value ?? 0);
+  const minutes = Math.floor(safe / 60);
+  const seconds = Math.floor(safe % 60);
+  const tenths = Math.floor((safe % 1) * 10);
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${tenths}`;
+}
+
 export function recalculatePlans(plans: LightingPlan[]) {
   for (const plan of plans) {
     const scenes = [...plan.scenes].sort((a, b) => a.order - b.order);
     let absoluteCursor = 0;
     for (const scene of scenes) {
-      scene.startTime = absoluteCursor;
-      let sceneCursor = absoluteCursor;
+      if (scene.frozen) {
+        // 冻结场次是固定档期：开始点锁定，前面场次延长或缩短都不再推动它。
+        // 旧数据里没有记录固定点时，按当前顺排位置补记一次。
+        scene.frozenStartTime = Number((scene.frozenStartTime ?? absoluteCursor).toFixed(2));
+        scene.startTime = scene.frozenStartTime;
+      } else {
+        scene.startTime = Number(absoluteCursor.toFixed(2));
+      }
+      let sceneCursor = scene.startTime;
       for (const item of scene.cues) {
         const duration = Math.max(0.1, item.fadeIn + item.hold + item.fadeOut);
         item.duration = Number(duration.toFixed(2));
@@ -154,8 +169,10 @@ export function recalculatePlans(plans: LightingPlan[]) {
         item.endTime = Number((item.startTime + duration).toFixed(2));
         sceneCursor = Math.max(sceneCursor, item.endTime);
       }
-      scene.duration = Number(Math.max(0, sceneCursor - absoluteCursor).toFixed(2));
-      absoluteCursor = sceneCursor;
+      scene.duration = Number(Math.max(0, sceneCursor - scene.startTime).toFixed(2));
+      // 固定档期可能晚于顺排点（留空档）或早于顺排点（排期冲突），
+      // 后续未冻结场次一律从最晚结束点继续顺排，不回退。
+      absoluteCursor = Math.max(absoluteCursor, sceneCursor);
     }
   }
   return plans;
@@ -241,6 +258,41 @@ export function detectConflicts(plans: LightingPlan[]): CueConflict[] {
           });
         }
       }
+    }
+
+    // 固定档期核对：上游撞上冻结场次的固定开始点记排期冲突，提前结束留出空白记空档。
+    const orderedScenes = [...plan.scenes].sort((a, b) => a.order - b.order);
+    let scheduleCursor = 0;
+    let previousScene: Scene | undefined;
+    for (const scene of orderedScenes) {
+      if (scene.frozen && scene.frozenStartTime != null) {
+        const fixedStart = scene.frozenStartTime;
+        const delta = Number((scheduleCursor - fixedStart).toFixed(2));
+        const upstream = previousScene ? `「${previousScene.name}」${formatTime(scheduleCursor)} 结束` : '演出开场';
+        if (delta > 0) {
+          conflicts.push({
+            id: `${plan.id}-${scene.id}-schedule-collision`,
+            planId: plan.id,
+            sceneId: scene.id,
+            cueId: scene.cues[0]?.id ?? '',
+            severity: 'error',
+            type: 'schedule-collision',
+            message: `${upstream}，撞上「${scene.name}」的固定档期 ${formatTime(fixedStart)}，超出 ${delta.toFixed(1)} 秒；请压缩前面场次或解除冻结后重排`
+          });
+        } else if (delta < 0) {
+          conflicts.push({
+            id: `${plan.id}-${scene.id}-schedule-gap`,
+            planId: plan.id,
+            sceneId: scene.id,
+            cueId: scene.cues[0]?.id ?? '',
+            severity: 'warning',
+            type: 'schedule-gap',
+            message: `${upstream}，距「${scene.name}」的固定档期 ${formatTime(fixedStart)} 留有 ${(-delta).toFixed(1)} 秒空档；如需顺排请解除冻结`
+          });
+        }
+      }
+      scheduleCursor = Math.max(scheduleCursor, (scene.startTime ?? 0) + (scene.duration ?? 0));
+      previousScene = scene;
     }
   }
   return conflicts;

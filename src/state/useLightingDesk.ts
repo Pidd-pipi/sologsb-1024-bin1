@@ -2,6 +2,8 @@ import { useReducer } from 'react';
 import { recalculatePlans, samplePlans } from '../data';
 import type { Cue, EditorState, LightingPlan, Scene, UserRole, Workspace } from '../types';
 
+export { formatTime } from '../data';
+
 export const LIGHTING_STORAGE_KEY = 'sologsb-1024/lighting-cue-desk/v1';
 
 function clone<T>(value: T): T {
@@ -167,12 +169,4 @@ export function canEditScene(role: UserRole, scene: Scene | undefined) {
 
 export function canFreeze(role: UserRole) {
   return role === 'designer' || role === 'stage-manager';
-}
-
-export function formatTime(value: number | undefined) {
-  const safe = Math.max(0, value ?? 0);
-  const minutes = Math.floor(safe / 60);
-  const seconds = Math.floor(safe % 60);
-  const tenths = Math.floor((safe % 1) * 10);
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${tenths}`;
 }

@@ -67,6 +67,7 @@ import {
   Lock,
   LockOpen,
   Pause,
+  Pin,
   Plus,
   Redo2,
   RefreshCw,
@@ -110,7 +111,9 @@ function conflictLabel(conflict: CueConflict) {
     'follow-order': '跟随关系',
     'missing-data': '数据缺失',
     'duplicate-position': '灯位重复',
-    duration: '时间异常'
+    duration: '时间异常',
+    'schedule-collision': '排期冲突',
+    'schedule-gap': '场次空档'
   }[conflict.type];
 }
 
@@ -697,10 +700,22 @@ export default function App() {
       toast({ title: '当前角色不能冻结或解冻场次', status: 'warning' });
       return;
     }
-    commit(activeScene.frozen ? '解除场次冻结' : '冻结已确认场次', (next) => {
-      const scene = next.plans.find((plan) => plan.id === next.activePlanId)?.scenes.find((item) => item.id === next.selectedSceneId);
-      if (scene) scene.frozen = !scene.frozen;
-    });
+    commit(
+      activeScene.frozen ? '解除冻结，场次从上一场结束点重新顺排' : '冻结场次并记下固定档期',
+      (next) => {
+        const scene = next.plans.find((plan) => plan.id === next.activePlanId)?.scenes.find((item) => item.id === next.selectedSceneId);
+        if (!scene) return;
+        if (scene.frozen) {
+          // 解除冻结：清掉固定开始点，重算时会从上一场结束点重新顺排，后续场次跟着更新
+          scene.frozen = false;
+          delete scene.frozenStartTime;
+        } else {
+          // 冻结：把当前开始点记为固定档期，之后前面场次伸缩都不再推动该场次
+          scene.frozenStartTime = scene.startTime ?? 0;
+          scene.frozen = true;
+        }
+      }
+    );
   }
 
   function duplicatePlan() {
@@ -928,10 +943,17 @@ export default function App() {
                         {scene.frozen ? <Lock size={13} color="#9ae6b4" /> : <Unlock size={13} color="#718096" />}
                       </Flex>
                       <Flex mt={2} color="whiteAlpha.500" fontSize="10px" gap={2}>
+                        <Text>{formatTime(scene.startTime)} 开始</Text>
                         <Text>{formatTime(scene.duration)}</Text>
                         <Text>{scene.cues.length} 条</Text>
                         <Text color={sceneConflicts.length ? 'orange.300' : 'green.300'}>{sceneConflicts.length} 冲突</Text>
                       </Flex>
+                      {scene.frozen ? (
+                        <Flex mt={1} align="center" gap={1} color="green.300" fontSize="10px">
+                          <Pin size={10} />
+                          <Text>固定档期 · 锁定 {formatTime(scene.frozenStartTime ?? scene.startTime)}</Text>
+                        </Flex>
+                      ) : null}
                     </Box>
                   );
                 })}
@@ -982,6 +1004,11 @@ export default function App() {
                     <Flex align="center" gap={2}>
                       <Heading size="md">{activeScene.name}</Heading>
                       {activeScene.frozen ? <Tag colorScheme="green"><HStack spacing={1}><Lock size={12} /><Text>已冻结</Text></HStack></Tag> : <Tag variant="subtle">编辑中</Tag>}
+                      {activeScene.frozen ? (
+                        <Tag colorScheme="green" variant="outline">
+                          <HStack spacing={1}><Pin size={11} /><Text>固定档期 {formatTime(activeScene.frozenStartTime ?? activeScene.startTime)}</Text></HStack>
+                        </Tag>
+                      ) : null}
                     </Flex>
                     <Text color="whiteAlpha.500" fontSize="sm" mt={1}>
                       场次开始 {formatTime(activeScene.startTime)} · 时长 {formatTime(activeScene.duration)} · {activeScene.cues.length} 条提示
@@ -998,33 +1025,60 @@ export default function App() {
                 </Flex>
 
                 <Box mt={4}>
-                  <Flex mb={2} align="center">
+                  <Flex mb={2} align="center" gap={2}>
                     <Text color="whiteAlpha.600" fontSize="xs">自动重算时间轴</Text>
+                    {activeScene.frozen ? (
+                      <Tag size="sm" colorScheme="green" variant="subtle">
+                        <HStack spacing={1}><Pin size={10} /><Text>固定开始 {formatTime(activeScene.frozenStartTime ?? activeScene.startTime)}</Text></HStack>
+                      </Tag>
+                    ) : null}
                     <Spacer />
                     <Text color="whiteAlpha.500" fontSize="xs">{formatTime(activeScene.startTime)} — {formatTime((activeScene.startTime ?? 0) + (activeScene.duration ?? 0))}</Text>
                   </Flex>
-                  <Flex className="timeline-track" role="list" aria-label={`${activeScene.name}时间轴`}>
-                    {activeScene.cues.map((cue) => (
-                      <Tooltip key={cue.id} label={`${cue.number} ${cue.label}，${formatTime(cue.startTime)} 开始，持续 ${cue.duration?.toFixed(1)} 秒`}>
-                        <Box
-                          as="button"
-                          role="listitem"
-                          className="timeline-block focus-ring"
-                          aria-label={`时间轴 ${cue.number} ${cue.label}`}
-                          bg={cue.colorHex}
-                          color={cue.brightness > 55 ? '#111827' : '#fff'}
-                          flexGrow={Math.max(1, cue.duration ?? 1)}
-                          flexBasis={`${Math.max(40, (cue.duration ?? 1) * 14)}px`}
-                          borderLeft={cue.id === selectedCue?.id ? '3px solid #f6c453' : undefined}
-                          onClick={() => selectCue(activeScene.id, cue.id)}
+                  <Box position="relative">
+                    <Flex className="timeline-track" role="list" aria-label={`${activeScene.name}时间轴`}>
+                      {activeScene.cues.map((cue) => (
+                        <Tooltip key={cue.id} label={`${cue.number} ${cue.label}，${formatTime(cue.startTime)} 开始，持续 ${cue.duration?.toFixed(1)} 秒`}>
+                          <Box
+                            as="button"
+                            role="listitem"
+                            className="timeline-block focus-ring"
+                            aria-label={`时间轴 ${cue.number} ${cue.label}`}
+                            bg={cue.colorHex}
+                            color={cue.brightness > 55 ? '#111827' : '#fff'}
+                            flexGrow={Math.max(1, cue.duration ?? 1)}
+                            flexBasis={`${Math.max(40, (cue.duration ?? 1) * 14)}px`}
+                            borderLeft={cue.id === selectedCue?.id ? '3px solid #f6c453' : undefined}
+                            onClick={() => selectCue(activeScene.id, cue.id)}
+                          >
+                            <Text fontWeight="800">{cue.number}</Text>
+                            <Text noOfLines={1}>{cue.label}</Text>
+                          </Box>
+                        </Tooltip>
+                      ))}
+                      {!activeScene.cues.length ? <Text p={3} color="whiteAlpha.500" fontSize="sm">时间轴暂无数据</Text> : null}
+                    </Flex>
+                    {activeScene.frozen ? (
+                      <Tooltip label={`固定档期：开始时刻锁定为 ${formatTime(activeScene.frozenStartTime ?? activeScene.startTime)}，前面场次伸缩不再推动该场次`}>
+                        <Flex
+                          position="absolute"
+                          left="0"
+                          top="-4px"
+                          bottom="-4px"
+                          align="center"
+                          borderLeft="3px solid"
+                          borderColor="green.300"
+                          pl={1}
+                          aria-hidden="true"
+                          pointerEvents="none"
                         >
-                          <Text fontWeight="800">{cue.number}</Text>
-                          <Text noOfLines={1}>{cue.label}</Text>
-                        </Box>
+                          <Text color="green.300" fontSize="9px" fontWeight="700" sx={{ writingMode: 'vertical-rl' }}>
+                            固定 {formatTime(activeScene.frozenStartTime ?? activeScene.startTime)}
+                          </Text>
+                        </Flex>
                       </Tooltip>
-                    ))}
-                    {!activeScene.cues.length ? <Text p={3} color="whiteAlpha.500" fontSize="sm">时间轴暂无数据</Text> : null}
-                  </Flex>
+                    ) : null}
+                  </Box>
                 </Box>
               </Box>
 
@@ -1033,7 +1087,7 @@ export default function App() {
                   <AlertIcon />
                   <AlertDescription>
                     {activeScene.frozen
-                      ? '该场次已冻结。提示顺序与参数保持只读；可由灯光设计或舞台监督解除冻结。'
+                      ? `该场次已冻结为固定档期，开始时刻锁定为 ${formatTime(activeScene.frozenStartTime ?? activeScene.startTime)}。前面场次延长或缩短只会重排未冻结部分；解除冻结后将从上一条场次结束点重新顺排。`
                       : '当前角色处于审阅或执行权限，拖动顺序与参数编辑已锁定。'}
                   </AlertDescription>
                 </Alert>
